@@ -304,7 +304,7 @@ parse_arguments() {
 check_dependencies() {
 	echo 'Checking dependencies...'
 	local deps_to_install=''
-	local common_deps='p7zip wget wrestool icotool convert'
+	local common_deps='p7zip wget wrestool icotool convert bun'
 	local all_deps="$common_deps"
 
 	# Add format-specific dependencies
@@ -316,12 +316,12 @@ check_dependencies() {
 	# Command-to-package mappings per distro family
 	declare -A debian_pkgs=(
 		[p7zip]='p7zip-full' [wget]='wget' [wrestool]='icoutils'
-		[icotool]='icoutils' [convert]='imagemagick'
+		[icotool]='icoutils' [convert]='imagemagick' [bun]='bun'
 		[dpkg-deb]='dpkg-dev' [rpmbuild]='rpm'
 	)
 	declare -A rpm_pkgs=(
 		[p7zip]='p7zip p7zip-plugins' [wget]='wget' [wrestool]='icoutils'
-		[icotool]='icoutils' [convert]='ImageMagick'
+		[icotool]='icoutils' [convert]='ImageMagick' [bun]='bun'
 		[dpkg-deb]='dpkg' [rpmbuild]='rpm-build'
 	)
 
@@ -506,7 +506,7 @@ setup_electron_asar() {
 
 	if [[ $install_needed == true ]]; then
 		echo "Installing Electron and Asar locally into $work_dir..."
-		if ! npm install --no-save electron @electron/asar; then
+		if ! bun add --no-save electron @electron/asar; then
 			echo 'Failed to install Electron and/or Asar locally.' >&2
 			cd "$project_root" || exit 1
 			exit 1
@@ -715,11 +715,31 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	# Patch Cowork mode for Linux (TypeScript VM client + Unix socket)
 	patch_cowork_linux
 
+	# Enable Dispatch remote orchestrator on Linux
+	patch_dispatch_remote_orchestrator
+
 	# Copy cowork VM service daemon for Linux Cowork mode
 	echo 'Installing cowork VM service daemon...'
 	cp "$source_dir/scripts/cowork-vm-service.js" \
 		app.asar.contents/cowork-vm-service.js || exit 1
 	echo 'Cowork VM service daemon installed'
+}
+
+patch_dispatch_remote_orchestrator() {
+	echo '##############################################################'
+	echo 'Enabling Dispatch remote orchestrator on Linux...'
+	local index_js='app.asar.contents/.vite/build/index.js'
+
+	# The remote orchestrator (Dispatch / phone control) is gated by a module
+	# flag W0n that is hard-coded to false in this release. Flip it to true
+	# so the bridge exposes credentials to the renderer on Linux.
+	if grep -q 'let W0n=!1' "$index_js"; then
+		sed -i 's/let W0n=!1/let W0n=!0/g' "$index_js"
+		echo '  Enabled remote orchestrator flag (W0n)'
+	else
+		echo '  Warning: remote orchestrator flag pattern not found or already enabled'
+	fi
+	echo '##############################################################'
 }
 
 patch_titlebar_detection() {
@@ -1409,7 +1429,7 @@ install_node_pty() {
 		echo '{"name":"node-pty-build","version":"1.0.0","private":true}' > package.json
 
 		echo 'Installing node-pty (this compiles native module)...'
-		if npm install node-pty 2>&1; then
+		if bun add node-pty 2>&1; then
 			echo 'node-pty installed successfully'
 			pty_src_dir="$node_pty_build_dir/node_modules/node-pty"
 		else
