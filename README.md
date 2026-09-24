@@ -46,6 +46,24 @@ If you would like to run [MCP servers with Claude Desktop](https://modelcontextp
 inputs.claude-desktop.packages.${system}.claude-desktop-with-fhs
 ```
 
+### Note on `nixos-rebuild --impure`
+
+This flake imports its own `nixpkgs` with `config.allowUnfree = true;`, so it
+builds cleanly without `--impure`. If your `nixos-rebuild switch --flake`
+still refuses to evaluate, make sure your system flake allows unfree packages:
+
+```nix
+nixpkgs.config.allowUnfree = true;
+```
+
+If you prefer to keep your own nixpkgs strictly free, you can allow just
+Electron instead:
+
+```nix
+nixpkgs.config.allowUnfreePredicate = pkg:
+  builtins.elem (lib.getName pkg) [ "electron" ];
+```
+
 ## Other distributions
 
 This repository only provides a Nix flake, and does not provide a package for e.g. Ubuntu, Fedora, or Arch Linux.

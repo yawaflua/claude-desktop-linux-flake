@@ -5,7 +5,7 @@
   rustPlatform,
   rustc,
   napi-rs-cli,
-  nodejs,
+  bun,
   libiconv,
 }: let
   patchy-cnb-repo = ../patchy-cnb;
@@ -22,13 +22,13 @@ in
 
     nativeBuildInputs = [
       napi-rs-cli
-      nodejs
+      bun
     ];
 
     buildPhase = ''
       runHook preBuild
 
-      npm run build --offline
+      bun run build
 
       runHook postBuild
     '';

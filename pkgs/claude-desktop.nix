@@ -5,192 +5,261 @@
   electron,
   p7zip,
   icoutils,
-  nodePackages,
   imagemagick,
+  nodejs,
+  asar,
   makeDesktopItem,
-  makeWrapper,
-  patchy-cnb,
-  perl
-}: let
+  python3,
+  bash,
+  getent,
+  node-pty,
+}:
+let
   pname = "claude-desktop";
-  version = "0.14.10";
-  srcExe = fetchurl {
-    # NOTE: `?v=${version}` doesn't actually request a specific version. It's only being used here as a cache buster.
-    # In the future, this should more properly query GCP storage to get a specific version.
-    url = "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe?v=${version}";
-    hash = "sha256-Sn/lvMlfKd7b/utFvCxrkWNDJTug4OOSA4lo9YV8aqk=";
+  version = "2.7032.0";
+
+  # Upstream serves the Squirrel nupkg directly from the release channel;
+  # the per-version Claude-*.exe installer URLs are no longer published.
+  # To bump: read the SHA1/filename from
+  # https://downloads.claude.ai/releases/win32/<arch>/RELEASES
+  srcs = {
+    x86_64-linux = fetchurl {
+      url = "https://downloads.claude.ai/releases/win32/x64/AnthropicClaude-${version}-full.nupkg";
+      hash = "sha256-LEDGUB7yzbr2I5hpid2c14tZXHzf9RrtTSCkeNzcWTs=";
+    };
+    aarch64-linux = fetchurl {
+      url = "https://downloads.claude.ai/releases/win32/arm64/AnthropicClaude-${version}-full.nupkg";
+      hash = "sha256-KLprs2KnP07FFvT+lZIJHd0ylTCYPY7YJwIqyUG5AiM=";
+    };
+  };
+
+  srcPkg = srcs.${stdenvNoCC.hostPlatform.system} or (throw "Unsupported system: ${stdenvNoCC.hostPlatform.system}");
+
+  sourceRoot = lib.cleanSourceWith {
+    src = ./..;
+    filter = path: type:
+      let rel = lib.removePrefix (toString ./.. + "/") path;
+      in !(lib.hasPrefix "result" rel)
+      && !(lib.hasPrefix ".git" rel);
+  };
+
+  # The unwrapped electron derivation — contains the real ELF binary
+  electronUnwrapped = electron.passthru.unwrapped or electron;
+  electronDir = "${electronUnwrapped}/libexec/electron";
+
+  desktopItem = makeDesktopItem {
+    name = "claude-desktop";
+    exec = "claude-desktop %u";
+    icon = "claude-desktop";
+    type = "Application";
+    terminal = false;
+    desktopName = "Claude";
+    genericName = "Claude Desktop";
+    startupWMClass = "Claude";
+    categories = [ "Office" "Utility" ];
+    mimeTypes = [ "x-scheme-handler/claude" ];
   };
 in
-  stdenvNoCC.mkDerivation rec {
-    inherit pname version;
+stdenvNoCC.mkDerivation {
+  inherit pname version;
 
-    src = ./.;
+  src = srcPkg;
 
-    nativeBuildInputs = [
-      p7zip
-      nodePackages.asar
-      makeWrapper
-      imagemagick
-      icoutils
-      perl
-    ];
+  nativeBuildInputs = [
+    p7zip
+    nodejs
+    asar
+    icoutils
+    imagemagick
+    bash
+    python3
+    getent
+  ];
 
-    desktopItem = makeDesktopItem {
-      name = "claude";
-      exec = "claude-desktop %u";
-      icon = "claude";
-      type = "Application";
-      terminal = false;
-      desktopName = "Claude";
-      genericName = "Claude Desktop";
-      startupWMClass = "claude";
-      categories = [
-        "Office"
-        "Utility"
-      ];
-      mimeTypes = ["x-scheme-handler/claude"];
-    };
+  # The nupkg is unpacked by build.sh, not by stdenv
+  dontUnpack = true;
+  dontConfigure = true;
 
-    buildPhase = ''
-      runHook preBuild
+  buildPhase = ''
+    runHook preBuild
 
-      # Create temp working directory
-      mkdir -p $TMPDIR/build
-      cd $TMPDIR/build
+    export HOME=$TMPDIR
 
+    # Copy the nupkg to a writable location for build.sh. The name must keep
+    # the .nupkg extension — build.sh uses it to skip the installer unwrap.
+    cp $src AnthropicClaude-${version}-full.nupkg
 
-      # Extract installer exe, and nupkg within it
-      7z x -y ${srcExe}
+    # Run build.sh — handles extraction, patching, icon extraction, asar repacking
+    # sourceRoot points to the flake repo (contains scripts/)
+    bash ${sourceRoot}/scripts/build.sh \
+      --exe "$(pwd)/AnthropicClaude-${version}-full.nupkg" \
+      --source-dir "${sourceRoot}" \
+      --node-pty-dir "${node-pty}/lib/node_modules/node-pty" \
+      --build nix \
+      --clean no
 
-      # List the directory, in case the nupkg filename changes
-      ls -al .
+    runHook postBuild
+  '';
 
-      7z x -y "AnthropicClaude-${version}-full.nupkg"
+  installPhase = ''
+    runHook preInstall
 
-      # Package the icons from claude.exe
-      wrestool -x -t 14 lib/net45/claude.exe -o claude.ico
-      icotool -x claude.ico
+    #==========================================================================
+    # Create a custom Electron tree with app resources co-located.
+    #
+    # Chromium computes process.resourcesPath from /proc/self/exe, so it
+    # always points to electron-unwrapped's resources/ dir. When
+    # ELECTRON_FORCE_IS_PACKAGED=true, the app reads en-US.json from
+    # resourcesPath at module load time, causing an ENOENT crash.
+    #
+    # Solution: copy the Electron ELF binary into our own tree so that
+    # /proc/self/exe resolves here, then merge resources.
+    #==========================================================================
+    electron_tree=$out/lib/claude-desktop/electron
 
-      for size in 16 24 32 48 64 256; do
-        mkdir -p $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps
-        install -Dm 644 claude_*"$size"x"$size"x32.png \
-          $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
-      done
+    mkdir -p $electron_tree/resources
 
-      rm claude.ico
+    # Copy the ELF binary — MUST be a real copy (not symlink) so
+    # /proc/self/exe resolves to our tree
+    cp ${electronDir}/electron $electron_tree/electron
 
-      # Process app.asar files
-      # We need to replace claude-native-bindings.node in both the
-      # app.asar package and .unpacked directory
-      mkdir -p electron-app
-      cp "lib/net45/resources/app.asar" electron-app/
-      cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
+    # Symlink everything else from electron-unwrapped
+    for item in ${electronDir}/*; do
+      name=$(basename "$item")
+      [[ "$name" = "electron" ]] && continue
+      [[ "$name" = "resources" ]] && continue
+      ln -s "$item" "$electron_tree/$name"
+    done
 
-      cd electron-app
-      asar extract app.asar app.asar.contents
+    # Populate resources/ — start with Electron's own (default_app.asar)
+    for item in ${electronDir}/resources/*; do
+      ln -s "$item" "$electron_tree/resources/$(basename "$item")"
+    done
 
-      echo "Using search pattern: '$TARGET_PATTERN' within search base: '$SEARCH_BASE'"
-      SEARCH_BASE="app.asar.contents/.vite/renderer/main_window/assets"
-      TARGET_PATTERN="MainWindowPage-*.js"
+    # Install app.asar and unpacked resources into the merged tree
+    cp build/electron-app/app.asar $electron_tree/resources/
+    cp -r build/electron-app/app.asar.unpacked $electron_tree/resources/
 
-      echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
-      # Find the target file recursively (ensure only one matches)
-      TARGET_FILES=$(find "$SEARCH_BASE" -type f -name "$TARGET_PATTERN")
-      # Count non-empty lines to get the number of files found
-      NUM_FILES=$(echo "$TARGET_FILES" | grep -c .)
-      echo "Found $NUM_FILES matching files"
-      echo "Target files: $TARGET_FILES"
+    # Install tray icons into resources
+    for tray_icon in build/electron-app/nix-resources/Tray*; do
+      [[ -f "$tray_icon" ]] && cp "$tray_icon" $electron_tree/resources/
+    done
 
-      echo "##############################################################"
-      echo "Removing "'!'" from 'if ("'!'"isWindows && isMainWindow) return null;'"
-      echo "detection flag to to enable title bar"
+    # Install SSH helpers into resources
+    if [[ -d build/electron-app/nix-resources/claude-ssh ]]; then
+      cp -r build/electron-app/nix-resources/claude-ssh \
+        $electron_tree/resources/
+    fi
 
-      echo "Current working directory: '$PWD'"
-
-      echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
-      # Find the target file recursively (ensure only one matches)
-      if [ "$NUM_FILES" -eq 0 ]; then
-        echo "Error: No file matching '$TARGET_PATTERN' found within '$SEARCH_BASE'." >&2
-        exit 1
-      elif [ "$NUM_FILES" -gt 1 ]; then
-        echo "Error: Expected exactly one file matching '$TARGET_PATTERN' within '$SEARCH_BASE', but found $NUM_FILES." >&2
-        echo "Found files:" >&2
-        echo "$TARGET_FILES" >&2
-        exit 1
-      else
-        # Exactly one file found
-        TARGET_FILE="$TARGET_FILES" # Assign the found file path
-        echo "Found target file: $TARGET_FILE"
-
-        echo "Attempting to replace patterns like 'if(!VAR1 && VAR2)' with 'if(VAR1 && VAR2)' in $TARGET_FILE..."
-        perl -i -pe \
-          's{if\(!(\w+)\s*&&\s*(\w+)\)}{if($1 && $2)}g' \
-          "$TARGET_FILE"
-
-        # Verification: Check if the original pattern structure still exists
-        if ! grep -q -E '!\w+&&\w+' "$TARGET_FILE"; then
-          echo "Successfully replaced patterns like '!VAR1&&VAR2' with 'VAR1&&VAR2' in $TARGET_FILE"
-        else
-          echo "Warning: Some instances of '!VAR1&&VAR2' might still exist in $TARGET_FILE." >&2
-        fi        # Verification: Check if the original pattern structure still exists
+    # Install cowork resources (smol-bin, plugin shim)
+    for cowork_res in build/electron-app/nix-resources/smol-bin.*.vhdx \
+                      build/electron-app/nix-resources/cowork-plugin-shim.sh; do
+      if [[ -f "$cowork_res" ]]; then
+        cp "$cowork_res" $electron_tree/resources/
+        echo "Installed cowork resource: $(basename "$cowork_res")"
       fi
-      echo "##############################################################"
-      # exit 1
+    done
 
-      # Replace native bindings
-      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/claude-native/claude-native-binding.node
-      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/claude-native/claude-native-binding.node
+    # Install locale JSON files into resources
+    for locale_json in build/claude-extract/lib/net45/resources/*-*.json; do
+      [[ -f "$locale_json" ]] \
+        && cp "$locale_json" $electron_tree/resources/
+    done
 
-      # .vite/build/index.js in the app.asar expects the Tray icons to be
-      # placed inside the app.asar.
-      mkdir -p app.asar.contents/resources
-      ls ../lib/net45/resources/
-      cp ../lib/net45/resources/Tray* app.asar.contents/resources/
+    # Create the electron wrapper — replicates env setup from stock
+    # electron wrapper, then execs our custom binary
+    head -n -1 ${electron}/bin/electron > $electron_tree/electron-wrapper
+    echo "exec \"$electron_tree/electron\" \"\$@\"" >> $electron_tree/electron-wrapper
+    chmod +x $electron_tree/electron-wrapper
 
-      # Copy i18n json files
-      mkdir -p app.asar.contents/resources/i18n
-      cp ../lib/net45/resources/*.json app.asar.contents/resources/i18n/
+    # Update CHROME_DEVEL_SANDBOX to point to our tree's chrome-sandbox
+    substituteInPlace $electron_tree/electron-wrapper \
+      --replace-quiet "${electron}/libexec/electron/chrome-sandbox" \
+        "$electron_tree/chrome-sandbox"
 
-      # Repackage app.asar
-      asar pack app.asar.contents app.asar
+    #==========================================================================
+    # Standard install (icons, desktop file, launcher)
+    #==========================================================================
 
-      runHook postBuild
-    '';
+    # Convenience symlink for resources dir
+    ln -s $electron_tree/resources $out/lib/claude-desktop/resources
 
-    installPhase = ''
-      runHook preInstall
+    # Install icons
+    for size in 16 24 32 48 64 256; do
+      icon_dir=$out/share/icons/hicolor/"$size"x"$size"/apps
+      mkdir -p "$icon_dir"
+      icon=$(find build/ -name "claude_*''${size}x''${size}x32.png" 2>/dev/null | head -1)
+      if [[ -n "$icon" ]]; then
+        install -Dm644 "$icon" "$icon_dir/claude-desktop.png"
+      fi
+    done
 
-      # Electron directory structure
-      mkdir -p $out/lib/$pname
-      cp -r $TMPDIR/build/electron-app/app.asar $out/lib/$pname/
-      cp -r $TMPDIR/build/electron-app/app.asar.unpacked $out/lib/$pname/
+    # Install shared launcher library
+    install -Dm755 ${sourceRoot}/scripts/launcher-common.sh \
+      $out/lib/claude-desktop/launcher-common.sh
 
-      # Install icons
-      mkdir -p $out/share/icons
-      cp -r $TMPDIR/build/icons/* $out/share/icons
+    # Install .desktop file
+    mkdir -p $out/share/applications
+    install -Dm644 ${desktopItem}/share/applications/* $out/share/applications/
 
-      # Install .desktop file
-      mkdir -p $out/share/applications
-      install -Dm0644 ${desktopItem}/share/applications/claude.desktop $out/share/applications/claude.desktop
+    # Create launcher script
+    mkdir -p $out/bin
+    cat > $out/bin/claude-desktop <<'LAUNCHER'
+#!/usr/bin/env bash
+# Claude Desktop launcher for NixOS
 
-      # Create wrapper
-      mkdir -p $out/bin
-      makeWrapper ${electron}/bin/electron $out/bin/$pname \
-        --add-flags "$out/lib/$pname/app.asar" \
-        --add-flags "--openDevTools" \
-        --add-flags "\''${NIXOS_OZONE_WL:+\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations}}"
+electron_exec="ELECTRON_PLACEHOLDER"
+app_path="RESOURCES_PLACEHOLDER/app.asar"
 
-      runHook postInstall
-    '';
+source "LAUNCHER_LIB_PLACEHOLDER"
 
-    dontUnpack = true;
-    dontConfigure = true;
+# Handle --doctor flag
+if [[ "''${1:-}" == '--doctor' ]]; then
+	run_doctor "$electron_exec"
+	exit $?
+fi
 
-    meta = with lib; {
-      description = "Claude Desktop for Linux";
-      license = licenses.unfree;
-      platforms = platforms.unix;
-      sourceProvenance = with sourceTypes; [binaryNativeCode];
-      mainProgram = pname;
-    };
-  }
+# Setup logging and environment
+setup_logging || exit 1
+setup_electron_env
+cleanup_orphaned_cowork_daemon
+cleanup_stale_lock
+cleanup_stale_cowork_socket
+
+log_message '--- Claude Desktop Launcher Start (NixOS) ---'
+log_message "Timestamp: $(date)"
+log_message "Arguments: $@"
+
+if ! check_display; then
+	log_message 'No display detected (TTY session)'
+	echo 'Error: Claude Desktop requires a graphical desktop environment.' >&2
+	exit 1
+fi
+
+detect_display_backend
+build_electron_args 'nix'
+electron_args+=("$app_path")
+
+log_message "Executing: $electron_exec ''${electron_args[*]} $*"
+"$electron_exec" "''${electron_args[@]}" "$@" >> "$log_file" 2>&1
+exit_code=$?
+log_message "Electron exited with code: $exit_code"
+exit $exit_code
+LAUNCHER
+    substituteInPlace $out/bin/claude-desktop \
+      --replace-fail "ELECTRON_PLACEHOLDER" "$electron_tree/electron-wrapper" \
+      --replace-fail "RESOURCES_PLACEHOLDER" "$electron_tree/resources" \
+      --replace-fail "LAUNCHER_LIB_PLACEHOLDER" "$out/lib/claude-desktop/launcher-common.sh"
+    chmod +x $out/bin/claude-desktop
+
+    runHook postInstall
+  '';
+
+  meta = with lib; {
+    description = "Claude Desktop for Linux";
+    license = licenses.unfree;
+    platforms = [ "x86_64-linux" "aarch64-linux" ];
+    sourceProvenance = with sourceTypes; [ binaryNativeCode ];
+    mainProgram = "claude-desktop";
+  };
+}
