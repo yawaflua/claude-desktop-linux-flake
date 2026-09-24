@@ -16,20 +16,24 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.569.0";
+  version = "2.7032.0";
 
+  # Upstream serves the Squirrel nupkg directly from the release channel;
+  # the per-version Claude-*.exe installer URLs are no longer published.
+  # To bump: read the SHA1/filename from
+  # https://downloads.claude.ai/releases/win32/<arch>/RELEASES
   srcs = {
     x86_64-linux = fetchurl {
-      url = "https://downloads.claude.ai/releases/win32/x64/${version}/Claude-49894ad878c985b0dd77178b75b353f11481ebf4.exe";
-      hash = "sha256-NNbINx7IpfV8aQGSsTS7pkQzEDvs0lTygFhzjvQDHO0=";
+      url = "https://downloads.claude.ai/releases/win32/x64/AnthropicClaude-${version}-full.nupkg";
+      hash = "sha256-LEDGUB7yzbr2I5hpid2c14tZXHzf9RrtTSCkeNzcWTs=";
     };
     aarch64-linux = fetchurl {
-      url = "https://downloads.claude.ai/releases/win32/arm64/${version}/Claude-49894ad878c985b0dd77178b75b353f11481ebf4.exe";
-      hash = "sha256-/ZEQ/hE94Dm3n31pPZqaZg5Uz8LGrxIP9APgcxWye/M=";
+      url = "https://downloads.claude.ai/releases/win32/arm64/AnthropicClaude-${version}-full.nupkg";
+      hash = "sha256-KLprs2KnP07FFvT+lZIJHd0ylTCYPY7YJwIqyUG5AiM=";
     };
   };
 
-  srcExe = srcs.${stdenvNoCC.hostPlatform.system} or (throw "Unsupported system: ${stdenvNoCC.hostPlatform.system}");
+  srcPkg = srcs.${stdenvNoCC.hostPlatform.system} or (throw "Unsupported system: ${stdenvNoCC.hostPlatform.system}");
 
   sourceRoot = lib.cleanSourceWith {
     src = ./..;
@@ -59,7 +63,7 @@ in
 stdenvNoCC.mkDerivation {
   inherit pname version;
 
-  src = srcExe;
+  src = srcPkg;
 
   nativeBuildInputs = [
     p7zip
@@ -72,7 +76,7 @@ stdenvNoCC.mkDerivation {
     getent
   ];
 
-  # The exe is not a standard archive — use manual unpack
+  # The nupkg is unpacked by build.sh, not by stdenv
   dontUnpack = true;
   dontConfigure = true;
 
@@ -81,13 +85,14 @@ stdenvNoCC.mkDerivation {
 
     export HOME=$TMPDIR
 
-    # Copy exe to a writable location for build.sh
-    cp $src Claude-Setup.exe
+    # Copy the nupkg to a writable location for build.sh. The name must keep
+    # the .nupkg extension — build.sh uses it to skip the installer unwrap.
+    cp $src AnthropicClaude-${version}-full.nupkg
 
     # Run build.sh — handles extraction, patching, icon extraction, asar repacking
     # sourceRoot points to the flake repo (contains scripts/)
     bash ${sourceRoot}/scripts/build.sh \
-      --exe "$(pwd)/Claude-Setup.exe" \
+      --exe "$(pwd)/AnthropicClaude-${version}-full.nupkg" \
       --source-dir "${sourceRoot}" \
       --node-pty-dir "${node-pty}/lib/node_modules/node-pty" \
       --build nix \

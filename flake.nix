@@ -75,6 +75,33 @@
 
           default = claude-desktop;
         };
+
+        apps = rec {
+          # `nix run .#update` — resolve the newest Claude Desktop release,
+          # verify it, and rewrite version + both hashes in
+          # pkgs/claude-desktop.nix so `nix build` stays pure and cacheable.
+          update = {
+            type = "app";
+            program =
+              let
+                updater = pkgs.writeShellApplication {
+                  name = "claude-desktop-update";
+                  runtimeInputs = with pkgs; [
+                    wget
+                    gnused
+                    gnugrep
+                    gawk
+                    coreutils
+                    nix
+                  ];
+                  text = ''exec bash "${./scripts/update.sh}" "$@"'';
+                };
+              in
+              "${updater}/bin/claude-desktop-update";
+          };
+
+          default = update;
+        };
       }
     );
 }
