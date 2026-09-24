@@ -780,6 +780,9 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	# Patch tray icon selection
 	patch_tray_icon_selection
 
+	# Always attach the tray context menu on Linux
+	patch_tray_context_menu
+
 	# Patch menuBarEnabled to default to true when unset
 	patch_menu_bar_default
 
@@ -1035,11 +1038,20 @@ patch_tray_icon_selection() {
 	local index_js="$main_chunk_js"
 	local dark_check="${electron_var_re}.nativeTheme.shouldUseDarkColors"
 
-	# Newer releases pick a dedicated Linux tray icon themselves, honouring
-	# both dark mode and the desktop environment. Leave that alone — the
-	# upstream logic is strictly better than this override.
+	# Newer releases ship a dedicated Linux tray icon, but the icon flavor is
+	# a build-time constant — the Windows bundle hardcodes switch(`ico`) and
+	# hands Tray a .ico, which nativeImage can't decode on Linux (broken
+	# icon). Flip the constant to `png` so upstream's own Linux branch runs.
 	if grep -q 'TrayIconLinux' "$index_js"; then
-		echo '  Upstream already selects a Linux tray icon; skipping'
+		if grep -qP 'switch\([`"]ico[`"]\)\{case[`"]ico[`"]:' "$index_js"; then
+			sed -i -E \
+				's/switch\([`"]ico[`"]\)\{case([`"])ico[`"]:/switch(\1png\1){case\1ico\1:/g' \
+				"$index_js"
+			sed -i -E 's/trayIconFlavor:[`"]ico[`"]/trayIconFlavor:`png`/g' "$index_js"
+			echo '  Switched tray icon flavor from ico to png'
+		else
+			echo '  Upstream already selects a Linux tray icon; skipping'
+		fi
 		echo '##############################################################'
 		return
 	fi
@@ -1052,6 +1064,34 @@ patch_tray_icon_selection() {
 	else
 		echo 'Tray icon selection pattern not found or already patched'
 	fi
+	echo '##############################################################'
+}
+
+patch_tray_context_menu() {
+	echo 'Patching tray context menu for Linux...'
+	local index_js="$main_chunk_js"
+
+	# Behind a feature flag (the tray usage menu) upstream stops calling
+	# setContextMenu and instead builds the menu lazily from the Tray
+	# `right-click` event. Electron never emits `right-click` for Linux
+	# StatusNotifierItem trays, so the menu would never appear. Keep the
+	# flag's other effects but always attach the menu on Linux.
+	local re_refresh='if\(([[:alnum:]_$]+)\(\)\)\{([[:alnum:]_$]+)=!0,([[:alnum:]_$]+)\.setContextMenu\(null\)'
+	local re_create='([[:alnum:]_$]+)\(\)\|\|\(([[:alnum:]_$]+)\.setContextMenu\('
+	local patched=0
+	if grep -qE "$re_refresh" "$index_js"; then
+		sed -i -E "s/${re_refresh}/if(process.platform!==\"linux\"\&\&\1()){\2=!0,\3.setContextMenu(null)/" \
+			"$index_js"
+		echo '  Kept context menu attached on refresh'
+		patched=1
+	fi
+	if grep -qE "$re_create" "$index_js"; then
+		sed -i -E "s/${re_create}/(process.platform!==\"linux\"\&\&\1())||(\2.setContextMenu(/" \
+			"$index_js"
+		echo '  Attached context menu on tray creation'
+		patched=1
+	fi
+	((patched)) || echo '  Tray context menu pattern not found; skipping'
 	echo '##############################################################'
 }
 
